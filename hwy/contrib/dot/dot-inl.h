@@ -168,28 +168,9 @@ struct Dot {
 
     HWY_LANES_CONSTEXPR size_t NF = Lanes(df);
 
-    constexpr bool kIsAtLeastOneVector =
-        (kAssumptions & kAtLeastOneVector) != 0;
     constexpr bool kIsMultipleOfVector =
         (kAssumptions & kMultipleOfVector) != 0;
     constexpr bool kIsPaddedToVector = (kAssumptions & kPaddedToVector) != 0;
-
-    // Won't be able to do a full vector load without padding => scalar loop.
-    if (!kIsAtLeastOneVector && !kIsMultipleOfVector && !kIsPaddedToVector &&
-        HWY_UNLIKELY(num_elements < NF)) {
-      // Only 2x unroll to avoid excessive code size.
-      float sum0 = 0.0f;
-      float sum1 = 0.0f;
-      size_t i = 0;
-      for (; i + 2 <= num_elements; i += 2) {
-        sum0 += pa[i + 0] * ConvertScalarTo<float>(pb[i + 0]);
-        sum1 += pa[i + 1] * ConvertScalarTo<float>(pb[i + 1]);
-      }
-      for (; i < num_elements; ++i) {
-        sum1 += pa[i] * ConvertScalarTo<float>(pb[i]);
-      }
-      return sum0 + sum1;
-    }
 
     // Compiler doesn't make independent sum* accumulators, so unroll manually.
     // 2 FMA ports * 4 cycle latency = up to 8 in-flight, but that is excessive
@@ -239,15 +220,9 @@ struct Dot {
           const VF b = PromoteTo(df, LoadU(dbfh, pb + i));
           sum1 = MulAdd(IfThenElseZero(mask, a), IfThenElseZero(mask, b), sum1);
         } else {
-          // Unaligned load such that the last element is in the highest lane -
-          // ensures we do not touch any elements outside the valid range.
-          // If we get here, then num_elements >= N.
-          HWY_DASSERT(i >= NF);
-          i += remaining - NF;
-          const auto skip = FirstN(df, NF - remaining);
-          const VF a = LoadU(df, pa + i);  // always unaligned
-          const VF b = PromoteTo(df, LoadU(dbfh, pb + i));
-          sum1 = MulAdd(IfThenZeroElse(skip, a), IfThenZeroElse(skip, b), sum1);
+          const VF a = LoadN(df, pa + i, remaining);
+          const VF b = PromoteTo(df, LoadN(dbfh, pb + i, remaining));
+          sum1 = MulAdd(a, b, sum1);
         }
       }
     }  // kMultipleOfVector
@@ -273,26 +248,9 @@ struct Dot {
     HWY_LANES_CONSTEXPR size_t N = Lanes(d);
     size_t i = 0;
 
-    constexpr bool kIsAtLeastOneVector =
-        (kAssumptions & kAtLeastOneVector) != 0;
     constexpr bool kIsMultipleOfVector =
         (kAssumptions & kMultipleOfVector) != 0;
     constexpr bool kIsPaddedToVector = (kAssumptions & kPaddedToVector) != 0;
-
-    // Won't be able to do a full vector load without padding => scalar loop.
-    if (!kIsAtLeastOneVector && !kIsMultipleOfVector && !kIsPaddedToVector &&
-        HWY_UNLIKELY(num_elements < N)) {
-      float sum0 = 0.0f;  // Only 2x unroll to avoid excessive code size for..
-      float sum1 = 0.0f;  // this unlikely(?) case.
-      for (; i + 2 <= num_elements; i += 2) {
-        sum0 += F32FromBF16(pa[i + 0]) * F32FromBF16(pb[i + 0]);
-        sum1 += F32FromBF16(pa[i + 1]) * F32FromBF16(pb[i + 1]);
-      }
-      if (i < num_elements) {
-        sum1 += F32FromBF16(pa[i]) * F32FromBF16(pb[i]);
-      }
-      return sum0 + sum1;
-    }
 
     // See comment in the other Compute() overload. Unroll 2x, but we need
     // twice as many sums for ReorderWidenMulAccumulate.
@@ -331,19 +289,10 @@ struct Dot {
           const auto a16 = BitCast(d, IfThenElseZero(mask, BitCast(du16, va)));
           const auto b16 = BitCast(d, IfThenElseZero(mask, BitCast(du16, vb)));
           sum2 = ReorderWidenMulAccumulate(df32, a16, b16, sum2, sum3);
-
         } else {
-          // Unaligned load such that the last element is in the highest lane -
-          // ensures we do not touch any elements outside the valid range.
-          // If we get here, then num_elements >= N.
-          HWY_DASSERT(i >= N);
-          i += remaining - N;
-          const auto skip = FirstN(du16, N - remaining);
-          const auto va = LoadU(d, pa + i);  // always unaligned
-          const auto vb = LoadU(d, pb + i);
-          const auto a16 = BitCast(d, IfThenZeroElse(skip, BitCast(du16, va)));
-          const auto b16 = BitCast(d, IfThenZeroElse(skip, BitCast(du16, vb)));
-          sum2 = ReorderWidenMulAccumulate(df32, a16, b16, sum2, sum3);
+          const auto a = LoadN(d, pa + i, remaining);
+          const auto b = LoadN(d, pb + i, remaining);
+          sum2 = ReorderWidenMulAccumulate(df32, a, b, sum2, sum3);
         }
       }
     }  // kMultipleOfVector
